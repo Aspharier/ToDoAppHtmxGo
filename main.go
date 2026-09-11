@@ -1,54 +1,198 @@
 package main
 
-// Importing the libraries
 import (
-	"database/sql"
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
-	_ "github.com/go-sql-driver/mysql"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 type Todo struct {
-	ID int `json:"id"`
-	Title string `json:"title"`
-	Completed bool `json:"completed"`
+	ID        int    `json:"id"`
+	Title     string `json:"title"`
+	Completed bool   `json:"completed"`
+	Time      string `json:"time,omitempty"`
 }
 
-var db *sql.DB
-fun main() {
-	var err error 
-	dsn := "root:Thecityofroma@123@tcp(localhost:3306)/todo_app"
-	db, err = sql.Open("mysql", dsn)
+var (
+	db         *bbolt.DB
+	todoBucket = []byte("todos")
+)
+
+// itob converts an integer ID to an 8-byte big-endian slice.
+// This ensures that bbolt preserves chronological/numerical sorting.
+func itob(v int) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v))
+	return b
+}
+
+func initDB(dbPath string) (*bbolt.DB, error) {
+	database, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
-		log.Fatalf("Error connecting to the database: %v", err)
-	}
-
-	defer db.Close()
-	if err = db.Ping(); err != nil {
-		log.Fatalf("Error pinging the database: %v", err)
-	}
-
-	http.HandleFunc("/", indexHandler)
-	http.HandleFunc("/api/todos", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			getTodosHandler(w, r)
-		} else if r.Method == http.MethodPost {
-			addTodoHandler(w, r)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		if err == bbolt.ErrTimeout {
+			return nil, fmt.Errorf("database file '%s' is locked by another running instance of this application. Please close the other instance or stop the existing process", dbPath)
 		}
-	})
-	http.HandleFunc("/api/delete-todo", deleteTodoHandler)
-	http.HandleFunc("/api/complete-todo", completeTodoHandler)
-	log.Println("Server is running on http://localhost:8080")
-	
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatalf("Error starting server: %v", err)
+		return nil, err
 	}
+
+	err = database.Update(func(tx *bbolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(todoBucket)
+		return err
+	})
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+
+	return database, nil
 }
 
+func getAllTodos() ([]Todo, error) {
+	var todos []Todo
+	err := db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(todoBucket)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var todo Todo
+			if err := json.Unmarshal(v, &todo); err == nil {
+				todos = append(todos, todo)
+			}
+		}
+		return nil
+	})
+	return todos, err
+}
+
+func addTodo(title string, timeStr string) (Todo, error) {
+	var todo Todo
+	err := db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(todoBucket)
+		id, err := b.NextSequence()
+		if err != nil {
+			return err
+		}
+
+		if timeStr == "" {
+			timeStr = time.Now().Format("3:04 PM")
+		}
+
+		todo = Todo{
+			ID:        int(id),
+			Title:     title,
+			Completed: false,
+			Time:      timeStr,
+		}
+
+		data, err := json.Marshal(todo)
+		if err != nil {
+			return err
+		}
+
+		return b.Put(itob(todo.ID), data)
+	})
+	return todo, err
+}
+
+func deleteTodo(id int) error {
+	return db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(todoBucket)
+		return b.Delete(itob(id))
+	})
+}
+
+func toggleTodo(id int) (Todo, error) {
+	var todo Todo
+	err := db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(todoBucket)
+		data := b.Get(itob(id))
+		if data == nil {
+			return os.ErrNotExist
+		}
+
+		if err := json.Unmarshal(data, &todo); err != nil {
+			return err
+		}
+
+		todo.Completed = !todo.Completed
+
+		updatedData, err := json.Marshal(todo)
+		if err != nil {
+			return err
+		}
+
+		return b.Put(itob(id), updatedData)
+	})
+	return todo, err
+}
+
+func renderTodoHtml(todo Todo) string {
+	completedClass := ""
+	circleCheckedClass := ""
+	checkIcon := ""
+	if todo.Completed {
+		completedClass = " is-completed"
+		circleCheckedClass = " checked"
+		checkIcon = `<svg class="check-svg" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`
+	}
+
+	timeDisplay := todo.Time
+	if timeDisplay == "" {
+		timeDisplay = time.Now().Format("3:04 PM")
+	}
+
+	escapedTitle := template.HTMLEscapeString(todo.Title)
+	escapedTime := template.HTMLEscapeString(timeDisplay)
+
+	return fmt.Sprintf(`
+	<div class="todo-item%s" id="todo-%d">
+		<input type="hidden" name="id" value="%d">
+		<div class="todo-content">
+			<span class="todo-title">%s</span>
+			<span class="todo-time">%s</span>
+		</div>
+		<div class="todo-actions">
+			<button class="btn-delete"
+					hx-post="/api/delete-todo"
+					hx-target="#todo-%d"
+					hx-swap="outerHTML"
+					hx-include="#todo-%d [name=id]"
+					title="Delete Task"
+					type="button">
+				<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M3 6h18"></path>
+					<path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+					<path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+				</svg>
+			</button>
+			<button class="circle-check%s"
+					hx-post="/api/complete-todo"
+					hx-target="#todo-%d"
+					hx-swap="outerHTML"
+					hx-include="#todo-%d [name=id]"
+					aria-label="Toggle Complete"
+					type="button">
+				%s
+			</button>
+		</div>
+	</div>`, completedClass, todo.ID, todo.ID, escapedTitle, escapedTime, todo.ID, todo.ID, circleCheckedClass, todo.ID, todo.ID, checkIcon)
+}
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl, err := template.ParseFiles("index.html")
@@ -59,62 +203,24 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	tmpl.Execute(w, nil)
 }
 
-func renderTodoHtml(todo Todo) string {
-	completedStatus := ""
-	bgColor := "white"
-	buttonText := "Complete"
-	if todo.Completed {
-		completedStatus = " (Completed)"
-		bgColor = "#f0f0f0" // light grey background for completed tasks
-		buttonText = "Uncomplete"
-	}
-	return fmt.Sprintf(`
-	<div class="todo-item" id="todo-%d" style="background-color: %s;">
-	<p><strong>%s</strong>%s</p>
-	<button hx-post="/api/delete-todo"
-	hx-target="#todo-%d"
-	hx-swap="outerHTML"
-	hx-include="#todo-%d [name=id]"
-	type="button">
-	Delete
-	</button>
-	<button hx-post="/api/complete-todo"
-	hx-target="#todo-%d"
-	hx-swap="outerHTML"
-	hx-include="#todo-%d [name=id]"
-	type="button">
-								%s
-	</button>
-	<input type="hidden" name="id" value="%d">
-	</div>`, todo.ID, bgColor, todo.Title, completedStatus, todo.ID, todo.ID, todo.ID, todo.ID, buttonText, todo.ID)
-}
-
 func getTodosHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT id, title, completed FROM todos")
+	todos, err := getAllTodos()
 	if err != nil {
 		http.Error(w, "Unable to fetch TODO items", http.StatusInternalServerError)
 		return
 	}
 
-	defer rows.Close()
-	var todos []Todo
-	for rows.Next() {
-		var todo Todo
-		if err := rows.Scan(&todo.ID, &todo.Title, &todo.Completed); err != nil {
-			http.Error(w, "Error reading TODO items", http.StatusInternalServerError)
-			return
+	var sb strings.Builder
+	if len(todos) == 0 {
+		sb.WriteString(`<div class="empty-placeholder">No tasks for today. Tap <strong>+ Add Task</strong> below!</div>`)
+	} else {
+		for _, todo := range todos {
+			sb.WriteString(renderTodoHtml(todo))
 		}
-
-		todos = append(todos, todo)
 	}
 
-	var html string
-	for _, todo := range todos {
-		html += renderTodoHtml(todo)
-	}
-
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(sb.String()))
 }
 
 func addTodoHandler(w http.ResponseWriter, r *http.Request) {
@@ -123,42 +229,27 @@ func addTodoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	title := r.FormValue("title")
+	title := strings.TrimSpace(r.FormValue("title"))
 	if title == "" {
 		http.Error(w, "Title is required", http.StatusBadRequest)
 		return
 	}
 
-	// Insert new TOdo into the database
-	result, err := db.Exec("INSERT INTO todos (title, completed) VALUES (?, false)", title)
+	timeStr := strings.TrimSpace(r.FormValue("time"))
+	if timeStr == "" {
+		timeStr = time.Now().Format("3:04 PM")
+	}
+
+	todo, err := addTodo(title, timeStr)
 	if err != nil {
 		http.Error(w, "Unable to add TODO item", http.StatusInternalServerError)
 		return
 	}
 
-	// Get the last inserted ID
-	id, err := result.LastInsertId()
-	if err != nil {
-		http.Error(w, "Unable to fetch inserted ID", http.StatusInternalServerError)
-		return
-	}
-
-	// Fetch the newly added ToDo from the database
-	todo := Todo {
-		ID: int(id),
-		Title: title,
-		Completed: false,
-	}
-
-	// Render the newly added ToDo item as HTMl
-	html := renderTodoHtml(todo)
-	// Return the generated HTML for the new todo
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(renderTodoHtml(todo)))
 }
 
-
-// Detel Todo Handler deletes a ToDo item by ID.
 func deleteTodoHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -170,73 +261,133 @@ func deleteTodoHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.FormValue("id")
-	if id == "" {
-		http.Error(w, "ID is required", http.StatusBadRequest)
-		return
-	}
-
-	// Execute the delete query
-	_, err := db.Exec("DELETE FROM todos WHERE id = ?", id)
+	idStr := r.FormValue("id")
+	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "Unable to delete Todo Item", http.StatusInternalServerError)
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
 		return
 	}
 
-	// Respond with an empty string to indicate successful deletion.
-	w.Header().Set("Content-Type", "text/html")
+	if err := deleteTodo(id); err != nil {
+		http.Error(w, "Unable to delete Todo item", http.StatusInternalServerError)
+		return
+	}
+
+	// Empty body indicates deletion to HTMX (swaps outerHTML with nothing)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(""))
 }
 
-// Complete Todo Handler toggles the completed status of todo item by ID.
 func completeTodoHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid form data", http.StatusBadRequest)
 		return
 	}
 
-	id := r.FormValue("id")
-	if id == "" {
-		http.Error(w, "ID is required", http.StatusBadRequest)
-		return
-	}
-
-	// Toggle the completed status
-	var completed bool
-	err := db.QueryRow("SELECT completed FROM todos WHERE id = ?", id).Scan(&completed)
-	if err == sql.ErrNoRows {
-		http.Error(w, "TODO item not found", http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, "Unable to fetch TODO item", http.StatusInternalServerError)
-		return
-	}
-
-	// Update the completed status
-	_, err = db.Exec("UPDATE todos SET completed = ? WHERE id = ?", !completed, id)
+	idStr := r.FormValue("id")
+	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "Unable to update TODO item", http.StatusInternalServerError)
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
 		return
 	}
 
-	// Fetch the updated Todo item
-	var todo Todo
-	err = db.QueryRow("SELECT id, title, completed FROM todos WHERE id = ?", id).Scan(&todo.ID, &todo.Title, &todo.completed)
-	if err == sql.ErrNoRows {
-		http.Error(w, "Update todo item not found", http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, "Unable to fetch updated TODO Item", http.StatusInternalServerError)
+	todo, err := toggleTodo(id)
+	if err != nil {
+		if err == os.ErrNotExist {
+			http.Error(w, "Todo item not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Unable to update Todo item", http.StatusInternalServerError)
 		return
 	}
 
-	// Render and return the updated ToDo item's HTML
-	html := renderTodoHtml(todo)
-	w.Header().Set("Content-Type", "text/html")
-	w.Write([]byte(html))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(renderTodoHtml(todo)))
 }
 
+// getLocalIP attempts to return the primary local non-loopback IP address.
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "localhost"
+	}
+	for _, address := range addrs {
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return "localhost"
+}
+
+func main() {
+	var err error
+	db, err = initDB("todos.db")
+	if err != nil {
+		log.Fatalf("Error opening bbolt database: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", indexHandler)
+	mux.HandleFunc("/api/todos", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getTodosHandler(w, r)
+		case http.MethodPost:
+			addTodoHandler(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/delete-todo", deleteTodoHandler)
+	mux.HandleFunc("/api/complete-todo", completeTodoHandler)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	localIP := getLocalIP()
+	log.Println("==================================================")
+	log.Printf("🚀 ToDo App running with fast embedded bbolt database!\n")
+	log.Printf("💻 Desktop Access : http://localhost:%s\n", port)
+	log.Printf("📱 Phone Access   : http://%s:%s (on same Wi-Fi)\n", localIP, port)
+	log.Println("==================================================")
+
+	server := &http.Server{
+		Addr:    "0.0.0.0:" + port,
+		Handler: mux,
+	}
+
+	// Listen for shutdown signals
+	stopChan := make(chan os.Signal, 1)
+	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Error starting server: %v", err)
+		}
+	}()
+
+	<-stopChan
+	log.Println("\nShutting down server gracefully...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+
+	if err := db.Close(); err != nil {
+		log.Printf("Error closing database: %v", err)
+	}
+
+	log.Println("Database closed. Goodbye!")
+}

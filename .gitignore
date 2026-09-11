@@ -1,0 +1,15 @@
+# bbolt database file
+*.db
+*.db-lock
+
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+
+# OS files
+.DS_Store
+Thumbs.db

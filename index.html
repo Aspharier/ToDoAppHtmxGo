@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>My Everyday — ToDo</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <style>
+        :root {
+            --ios-font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --text-primary: #111827;
+            --text-secondary: #4b5563;
+            --text-muted: #6b7280;
+            --text-disabled: #9ca3af;
+            --green-active: #22c55e;
+            --green-check: #16a34a;
+            --green-bg: #ecfdf5;
+            --border-subtle: #f3f4f6;
+            --border-circle: #cbd5e1;
+            --ios-blue: #2563eb;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: var(--ios-font);
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            min-height: 100vh;
+            background-color: #f3f4f8;
+            /* Premium iOS ambient liquid glass gradient */
+            background-image: 
+                radial-gradient(at 10% 15%, rgba(199, 210, 254, 0.7) 0px, transparent 50%),
+                radial-gradient(at 90% 10%, rgba(251, 207, 232, 0.65) 0px, transparent 45%),
+                radial-gradient(at 50% 85%, rgba(186, 230, 253, 0.65) 0px, transparent 55%),
+                radial-gradient(at 85% 85%, rgba(221, 214, 254, 0.6) 0px, transparent 50%);
+            background-attachment: fixed;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 16px;
+        }
+
+        /* iOS Liquid Glass Card */
+        .ios-card {
+            width: 100%;
+            max-width: 390px;
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(45px) saturate(210%);
+            -webkit-backdrop-filter: blur(45px) saturate(210%);
+            border: 1px solid rgba(255, 255, 255, 0.95);
+            border-radius: 38px;
+            box-shadow: 
+                0 25px 65px -12px rgba(30, 41, 59, 0.15),
+                0 0 0 1px rgba(0, 0, 0, 0.04),
+                inset 0 1.5px 1.5px rgba(255, 255, 255, 0.95);
+            padding: 28px 24px 18px 24px;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Card Header */
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .header-title {
+            font-size: 1.85rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            color: var(--text-primary);
+        }
+
+        /* Subheader Bar (Date) */
+        .subheader-bar {
+            display: flex;
+            align-items: center;
+            font-size: 0.88rem;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+            padding-bottom: 4px;
+            font-weight: 500;
+        }
+
+        .date-display {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+        }
+
+        .date-display svg {
+            color: var(--text-secondary);
+        }
+
+        /* Task List Container */
+        #todo-list {
+            display: flex;
+            flex-direction: column;
+            min-height: 180px;
+            max-height: 480px;
+            overflow-y: auto;
+            scrollbar-width: none;
+        }
+
+        #todo-list::-webkit-scrollbar {
+            display: none;
+        }
+
+        /* Todo Item Row */
+        .todo-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 2px;
+            border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+            transition: background-color 0.15s ease;
+            position: relative;
+        }
+
+        .todo-item:last-child {
+            border-bottom: none;
+        }
+
+        .todo-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            padding-right: 14px;
+            cursor: default;
+        }
+
+        .todo-title {
+            font-size: 0.98rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            line-height: 1.35;
+            transition: color 0.2s ease;
+            word-break: break-word;
+        }
+
+        .todo-time {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            transition: color 0.2s ease;
+        }
+
+        /* Completed State */
+        .todo-item.is-completed .todo-title {
+            color: var(--text-disabled);
+            text-decoration: line-through;
+        }
+
+        .todo-item.is-completed .todo-time {
+            color: #d1d5db;
+        }
+
+        /* Action Buttons Container */
+        .todo-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* Circular Checkbox (Exact Match to Screenshot) */
+        .circle-check {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 2px solid var(--border-circle);
+            background: #ffffff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+            padding: 0;
+            flex-shrink: 0;
+            outline: none;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        .circle-check:hover {
+            border-color: #94a3b8;
+            transform: scale(1.05);
+        }
+
+        .circle-check:active {
+            transform: scale(0.92);
+        }
+
+        /* When checked: green border and soft green bg with green check */
+        .circle-check.checked {
+            border-color: var(--green-active);
+            background: var(--green-bg);
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+        }
+
+        .check-svg {
+            width: 17px;
+            height: 17px;
+            stroke: var(--green-check);
+            display: block;
+            animation: popIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        @keyframes popIn {
+            0% { transform: scale(0.4); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        /* Delete Button */
+        .btn-delete {
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: #9ca3af;
+            padding: 6px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.4;
+            transition: all 0.2s ease;
+        }
+
+        .todo-item:hover .btn-delete,
+        .btn-delete:focus {
+            opacity: 0.9;
+        }
+
+        .btn-delete:hover {
+            opacity: 1;
+            color: #dc2626;
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        /* Fallback for legacy button styling if ever present */
+        .btn-action {
+            border: 1px solid var(--border-circle);
+            border-radius: 8px;
+            padding: 6px 12px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            background: #fff;
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+
+        /* Empty State */
+        .empty-placeholder {
+            text-align: center;
+            padding: 40px 16px;
+            color: var(--text-muted);
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        /* Bottom Section: Add Task Trigger */
+        .card-footer {
+            margin-top: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding-top: 8px;
+        }
+
+        .btn-add-trigger {
+            background: none;
+            border: none;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            padding: 9px 20px;
+            border-radius: 20px;
+            transition: background 0.15s ease, transform 0.1s;
+        }
+
+        .btn-add-trigger:hover {
+            background: rgba(0, 0, 0, 0.05);
+        }
+
+        .btn-add-trigger:active {
+            transform: scale(0.96);
+        }
+
+        .plus-icon {
+            font-size: 1.3rem;
+            font-weight: 400;
+            line-height: 1;
+        }
+
+        /* Expandable Add Task Form */
+        .add-task-form-wrapper {
+            width: 100%;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
+            opacity: 0;
+        }
+
+        .add-task-form-wrapper.open {
+            max-height: 180px;
+            opacity: 1;
+            margin-top: 10px;
+        }
+
+        .glass-form {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 20px;
+            padding: 14px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        .ios-input {
+            flex: 1;
+            background: #f9fafb;
+            border: 1.5px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-size: 0.95rem;
+            color: var(--text-primary);
+            outline: none;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .ios-input:focus {
+            background: #ffffff;
+            border-color: var(--text-primary);
+        }
+
+        .ios-input::placeholder {
+            color: var(--text-disabled);
+        }
+
+        .ios-input-time {
+            width: 110px;
+            flex-shrink: 0;
+        }
+
+        .form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .btn-form {
+            border: none;
+            border-radius: 10px;
+            padding: 8px 16px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .btn-cancel {
+            background: #f3f4f6;
+            color: var(--text-secondary);
+        }
+
+        .btn-cancel:hover {
+            background: #e5e7eb;
+            color: var(--text-primary);
+        }
+
+        .btn-submit {
+            background: var(--text-primary);
+            color: #ffffff;
+        }
+
+        .btn-submit:hover {
+            background: #000000;
+        }
+
+        /* iOS Home Bar */
+        .ios-home-bar {
+            width: 135px;
+            height: 4.5px;
+            background: var(--text-primary);
+            border-radius: 100px;
+            margin: 18px auto 2px auto;
+            opacity: 0.85;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="ios-card">
+        <!-- Top Title -->
+        <div class="card-header">
+            <h1 class="header-title">My Everyday</h1>
+        </div>
+
+        <!-- Date Subheader -->
+        <div class="subheader-bar">
+            <div class="date-display">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+                    <line x1="16" y1="2" x2="16" y2="6"></line>
+                    <line x1="8" y1="2" x2="8" y2="6"></line>
+                    <line x1="3" y1="10" x2="21" y2="10"></line>
+                </svg>
+                <span id="current-date">Wed April 22, 2026</span>
+            </div>
+        </div>
+
+        <!-- Dynamic ToDo List (Loaded by HTMX) -->
+        <div id="todo-list"
+             hx-get="/api/todos"
+             hx-trigger="load"
+             hx-swap="innerHTML">
+            <!-- HTMX injects rendered items here -->
+        </div>
+
+        <!-- Add Task Section -->
+        <div class="card-footer">
+            <button class="btn-add-trigger" id="btn-add-trigger" type="button" onclick="toggleAddForm(true)">
+                <span class="plus-icon">+</span>
+                <span>Add Task</span>
+            </button>
+
+            <!-- Expandable Add Form -->
+            <div class="add-task-form-wrapper" id="add-form-wrapper">
+                <form class="glass-form"
+                      hx-post="/api/todos"
+                      hx-target="#todo-list"
+                      hx-swap="beforeend"
+                      hx-on::after-request="handleAfterAdd(event)">
+                    <div class="form-row">
+                        <input type="text"
+                               name="title"
+                               id="task-title-input"
+                               class="ios-input"
+                               placeholder="Task description..."
+                               autocomplete="off"
+                               required>
+                        <input type="text"
+                               name="time"
+                               id="task-time-input"
+                               class="ios-input ios-input-time"
+                               placeholder="e.g. 8:00 PM">
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn-form btn-cancel" onclick="toggleAddForm(false)">Cancel</button>
+                        <button type="submit" class="btn-form btn-submit">Save</button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- iOS Home Indicator Bar -->
+            <div class="ios-home-bar"></div>
+        </div>
+    </div>
+
+    <script>
+        function updateDate() {
+            const now = new Date();
+            const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            const months = [
+                "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            ];
+            const formatted = `${days[now.getDay()]} ${months[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()}`;
+            document.getElementById("current-date").textContent = formatted;
+        }
+        updateDate();
+
+        function toggleAddForm(show) {
+            const wrapper = document.getElementById("add-form-wrapper");
+            const trigger = document.getElementById("btn-add-trigger");
+            const titleInput = document.getElementById("task-title-input");
+            const timeInput = document.getElementById("task-time-input");
+
+            if (show) {
+                wrapper.classList.add("open");
+                trigger.style.display = "none";
+                
+                const now = new Date();
+                let hours = now.getHours();
+                const minutes = now.getMinutes().toString().padStart(2, '0');
+                const ampm = hours >= 12 ? 'PM' : 'AM';
+                hours = hours % 12;
+                hours = hours ? hours : 12;
+                timeInput.value = `${hours}:${minutes} ${ampm}`;
+
+                titleInput.focus();
+            } else {
+                wrapper.classList.remove("open");
+                trigger.style.display = "inline-flex";
+            }
+        }
+
+        function handleAfterAdd(event) {
+            if (event.detail.successful) {
+                const placeholder = document.querySelector(".empty-placeholder");
+                if (placeholder) {
+                    placeholder.remove();
+                }
+
+                document.getElementById("task-title-input").value = "";
+                toggleAddForm(false);
+
+                const list = document.getElementById("todo-list");
+                list.scrollTop = list.scrollHeight;
+            }
+        }
+    </script>
+</body>
+</html>

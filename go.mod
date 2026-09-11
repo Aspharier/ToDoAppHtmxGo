@@ -1,8 +1,7 @@
 module ToDoAppHtmxGo
 
-go 1.27.1
+go 1.22
 
-require (
-	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/go-sql-driver/mysql v1.10.1 // indirect
-)
+require go.etcd.io/bbolt v1.3.11
+
+require golang.org/x/sys v0.4.0 // indirect
